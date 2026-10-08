@@ -55,7 +55,7 @@ static int vddh_sample_fetch(const struct device *dev, enum sensor_channel chan)
         return rc;
     }
 
-    drv_data->value.millivolts = val * VDDHDIV;
+    drv_data->value.millivolts = battery_smooth_mv(&drv_data->value, val * VDDHDIV);
     drv_data->value.state_of_charge = lithium_ion_mv_to_pct(drv_data->value.millivolts);
 
     LOG_DBG("ADC raw %d ~ %d mV => %d%%", drv_data->value.adc_raw, drv_data->value.millivolts,

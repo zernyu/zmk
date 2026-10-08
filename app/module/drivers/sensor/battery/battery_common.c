@@ -31,18 +31,21 @@ int battery_channel_get(const struct battery_value *value, enum sensor_channel c
 }
 
 // Piecewise-linear discharge curve calibrated in-situ for generic 1500mAh 1S
-// LiPo cells on nice!nano v2, measured through the board's own divider/ADC so
-// any systematic measurement offset is already baked in. Anchors: 4050mV is
-// the resting voltage of a fully saturated (overnight) charge; 3630mV is where
-// battery reporting historically dropped out, so 0% means "charge now", with
-// remaining cell capacity below it kept as unobservable reserve. The shape
-// between anchors is a published 1S Li-ion OCV curve rescaled to that span.
+// LiPo cells on nice!nano v2, measured through the board's own ADC so any
+// systematic measurement offset is already baked in. Percent is share of
+// remaining keyboard runtime, fitted from a full logged discharge cycle:
+// 4050mV is the resting voltage after a saturated (overnight) charge, and the
+// cell spends most of its life on a very flat plateau around 3.74-3.82V.
+// Below 3630mV the curve is not yet measured; it is extended to a deliberately
+// low 3000mV so the voltage at which the keyboard actually dies shows up as a
+// non-zero reading and can be pinned down from the next cycle.
 static const struct {
     int16_t mv;
     uint8_t pct;
 } battery_curve[] = {
-    {4050, 100}, {4000, 94}, {3950, 83}, {3900, 69}, {3850, 57},
-    {3800, 44},  {3750, 31}, {3700, 17}, {3660, 7},  {3630, 0},
+    {4050, 100}, {3940, 93}, {3900, 89}, {3850, 84}, {3820, 80}, {3810, 75}, {3800, 69},
+    {3790, 64},  {3780, 57}, {3770, 50}, {3760, 42}, {3750, 32}, {3740, 22}, {3730, 15},
+    {3720, 12},  {3700, 9},  {3630, 6},  {3550, 4},  {3450, 2},  {3300, 1},  {3000, 0},
 };
 
 uint8_t lithium_ion_mv_to_pct(int16_t bat_mv) {
@@ -63,4 +66,24 @@ uint8_t lithium_ion_mv_to_pct(int16_t bat_mv) {
     }
 
     return 0;
+}
+// On the plateau a 1mV change is worth almost 1%, while load sag while typing
+// moves single readings by 10mV or more, so readings are smoothed with an
+// exponential moving average over ~16 samples (one per minute while active).
+// A jump larger than any load sag means USB power was connected or removed,
+// so the average restarts from the new reading instead of lagging behind.
+#define BATTERY_EMA_SHIFT 4
+#define BATTERY_EMA_SNAP_MV 100
+
+uint16_t battery_smooth_mv(struct battery_value *value, uint16_t raw_mv) {
+    const int32_t avg = (value->mv_ema_scaled + (1 << (BATTERY_EMA_SHIFT - 1))) >> BATTERY_EMA_SHIFT;
+
+    if (value->mv_ema_scaled == 0 || raw_mv > avg + BATTERY_EMA_SNAP_MV ||
+        raw_mv < avg - BATTERY_EMA_SNAP_MV) {
+        value->mv_ema_scaled = (int32_t)raw_mv << BATTERY_EMA_SHIFT;
+    } else {
+        value->mv_ema_scaled += raw_mv - avg;
+    }
+
+    return (value->mv_ema_scaled + (1 << (BATTERY_EMA_SHIFT - 1))) >> BATTERY_EMA_SHIFT;
 }
