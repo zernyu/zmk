@@ -22,6 +22,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/activity.h>
 #include <zmk/workqueue.h>
 
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_MV_GATT)
+#include <zmk/battery_mv_gatt.h>
+#endif
+
 static uint8_t last_state_of_charge = 0;
 
 uint8_t zmk_battery_state_of_charge(void) { return last_state_of_charge; }
@@ -89,6 +93,13 @@ static int zmk_battery_update(const struct device *battery) {
     LOG_DBG("State of change %d from %d mv", state_of_charge.val1, mv);
 #else
 #error "Not a supported reporting fetch mode"
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_MV_GATT)
+    struct sensor_value millivolts;
+    if (sensor_channel_get(battery, SENSOR_CHAN_GAUGE_VOLTAGE, &millivolts) == 0) {
+        zmk_battery_mv_gatt_update(millivolts.val1 * 1000 + millivolts.val2 / 1000);
+    }
 #endif
 
     if (last_state_of_charge != state_of_charge.val1) {

@@ -387,6 +387,11 @@ config ZMK_BATTERY_REPORTING_FETCH_MODE_LITHIUM_VOLTAGE
 
 endchoice
 
+config ZMK_BATTERY_MV_GATT
+    bool "Publish the battery voltage over a custom BLE GATT characteristic"
+    default y
+    depends on ZMK_BLE && (!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL)
+
 endif # ZMK_BATTERY_REPORTING
 
 config ZMK_IDLE_TIMEOUT
