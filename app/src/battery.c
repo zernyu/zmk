@@ -26,6 +26,46 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/battery_mv_gatt.h>
 #endif
 
+#define BATTERY_EMA_PERSIST                                                                        \
+    (IS_ENABLED(CONFIG_SETTINGS) &&                                                                \
+     (IS_ENABLED(CONFIG_ZMK_BATTERY_NRF_VDDH) || IS_ENABLED(CONFIG_ZMK_BATTERY_VOLTAGE_DIVIDER)))
+
+#if BATTERY_EMA_PERSIST
+#include <stdlib.h>
+#include <zephyr/settings/settings.h>
+#include "battery_common.h"
+
+// Skip the flash write when the average has moved less than 2mV since it was last saved.
+#define BATTERY_EMA_SAVE_DELTA (2 << BATTERY_EMA_SHIFT)
+
+static int32_t saved_ema_scaled;
+
+static int battery_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                void *cb_arg) {
+    if (!settings_name_steq(name, "ema", NULL) || len != sizeof(saved_ema_scaled)) {
+        return -ENOENT;
+    }
+    int rc = read_cb(cb_arg, &saved_ema_scaled, sizeof(saved_ema_scaled));
+    if (rc < 0) {
+        return rc;
+    }
+    battery_ema_restore(saved_ema_scaled);
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(battery, "battery", NULL, battery_settings_set, NULL, NULL);
+
+static void save_battery_ema(void) {
+    int32_t current = battery_ema_current();
+    if (current == 0 || abs(current - saved_ema_scaled) < BATTERY_EMA_SAVE_DELTA) {
+        return;
+    }
+    if (settings_save_one("battery/ema", &current, sizeof(current)) == 0) {
+        saved_ema_scaled = current;
+    }
+}
+#endif
+
 static uint8_t last_state_of_charge = 0;
 
 uint8_t zmk_battery_state_of_charge(void) { return last_state_of_charge; }
@@ -180,8 +220,14 @@ static int battery_event_listener(const zmk_event_t *eh) {
             zmk_battery_start_reporting();
             return 0;
         case ZMK_ACTIVITY_IDLE:
+            k_timer_stop(&battery_timer);
+            return 0;
         case ZMK_ACTIVITY_SLEEP:
             k_timer_stop(&battery_timer);
+#if BATTERY_EMA_PERSIST
+            // Deep sleep powers the chip off; keep the average for the next boot.
+            save_battery_ema();
+#endif
             return 0;
         default:
             break;

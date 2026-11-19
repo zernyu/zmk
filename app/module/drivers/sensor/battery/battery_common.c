@@ -5,7 +5,9 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 
 #include "battery_common.h"
@@ -72,18 +74,41 @@ uint8_t lithium_ion_mv_to_pct(int16_t bat_mv) {
 // exponential moving average over ~16 samples (one per minute while active).
 // A jump larger than any load sag means USB power was connected or removed,
 // so the average restarts from the new reading instead of lagging behind.
-#define BATTERY_EMA_SHIFT 4
 #define BATTERY_EMA_SNAP_MV 100
+// Readings in the first seconds after boot are taken while the radio reconnects, which
+// sags the voltage, and possibly before the saved average has been restored. They are
+// reported but not averaged in.
+#define BATTERY_EMA_SETTLE_MS 10000
+
+static int32_t restored_ema_scaled;
+static int32_t latest_ema_scaled;
+
+void battery_ema_restore(int32_t mv_ema_scaled) { restored_ema_scaled = mv_ema_scaled; }
+
+int32_t battery_ema_current(void) { return latest_ema_scaled; }
+
+static int32_t ema_mv(int32_t scaled) {
+    return (scaled + (1 << (BATTERY_EMA_SHIFT - 1))) >> BATTERY_EMA_SHIFT;
+}
 
 uint16_t battery_smooth_mv(struct battery_value *value, uint16_t raw_mv) {
-    const int32_t avg = (value->mv_ema_scaled + (1 << (BATTERY_EMA_SHIFT - 1))) >> BATTERY_EMA_SHIFT;
+    const bool restored = restored_ema_scaled != 0 &&
+                          abs((int32_t)raw_mv - ema_mv(restored_ema_scaled)) <= BATTERY_EMA_SNAP_MV;
 
-    if (value->mv_ema_scaled == 0 || raw_mv > avg + BATTERY_EMA_SNAP_MV ||
-        raw_mv < avg - BATTERY_EMA_SNAP_MV) {
+    if (value->mv_ema_scaled == 0) {
+        if (k_uptime_get() < BATTERY_EMA_SETTLE_MS) {
+            return restored ? ema_mv(restored_ema_scaled) : raw_mv;
+        }
+        value->mv_ema_scaled = restored ? restored_ema_scaled : (int32_t)raw_mv << BATTERY_EMA_SHIFT;
+    }
+
+    const int32_t avg = ema_mv(value->mv_ema_scaled);
+    if (abs((int32_t)raw_mv - avg) > BATTERY_EMA_SNAP_MV) {
         value->mv_ema_scaled = (int32_t)raw_mv << BATTERY_EMA_SHIFT;
     } else {
         value->mv_ema_scaled += raw_mv - avg;
     }
 
-    return (value->mv_ema_scaled + (1 << (BATTERY_EMA_SHIFT - 1))) >> BATTERY_EMA_SHIFT;
+    latest_ema_scaled = value->mv_ema_scaled;
+    return ema_mv(value->mv_ema_scaled);
 }
